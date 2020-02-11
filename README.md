@@ -1,4 +1,4 @@
-#MimbleWimble
+
 Example implementation of MimbleWimble protocol in Scala
 
 Limitations:

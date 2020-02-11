@@ -16,105 +16,188 @@ import org.bouncycastle.util.encoders.Hex
 object Main extends App {
     Security.addProvider(new BouncyCastleProvider)
 
-    import ECC._
-
     val message = "Hey there!"
     val msgBytes = message.getBytes(StandardCharsets.UTF_8)
 
-    //
-    // .1
-    val (ir, iGr, i) = MW.commitTo(BigInteger.valueOf(100))
-    val (iGk, ik) = generateKP()
+    val offer =
+        MW.offerMoney(
+            message,
+            List(
+                MW.commitTo(1),
+                MW.commitTo(2),
+                MW.commitTo(3),
+                MW.commitTo(4)
+            )
+        )
 
-    // => iGr, iGk
-    // .2
-    val (or, oGr, o) = MW.commitTo(BigInteger.valueOf(100))
-    val (oGk, ok) = generateKP()
+    // send to counterpart ===>
 
-    // .2.1
-    val oE = new BigInteger(Hash(iGk + oGk, msgBytes)) //+ oGr + iGr
-    val oS = ok + or * oE
+    val accept =
+        MW.acceptMoney(
+            offer.external,
+            List(
+                MW.commitTo(5),
+                MW.commitTo(3),
+                MW.commitTo(2)
+            )
+        )
 
-    // => oGr, oGk
-    // .3
-    val iE = new BigInteger(Hash(iGk + oGk, msgBytes)) //+ oGr + iGr
-    val iS = ik + ir.negate() * iE
+    // send back <===
+    val tx = MW.createTransaction(message, offer, accept)
 
-    val s = oS + iS
+    // push to block chain ===>
 
-    val pubKey = o - i
-
-    //        println(pubKey)
-    //println()
-
-    println(s"s: ${s.length} : ${s.toString(16)}\ne: ${iE.length} : ${iE.toString(16)}\ns: ${ir.length} : ${ir.toString(16)}")
-
-    val isValid = SchnorrAlgo.verify(msgBytes, pubKey, (s, iE))
+    // public validation on block chain
+    val isValid = MW.verifyTransaction(tx)
     println(s"Valid: $isValid")
 
-
-    ////    val (pk1, sk1) = generateKP()
-    ////    val (pk2, sk2) = generateKP()
-    //
-    //    //    val privateKey = sk1 - sk2
-    ////    val publicKey = pk1 - pk2
-    //
-    //    val sk1 = or
-    //    val sk2 = ir
-    //    val publicKey = o - i
-    //
-    //    val rk1 = generateKP()
-    //    val rk2 = generateKP()
-    //
-    //    val s1 = SchnorrAlgo.sign2(msgBytes, sk1, rk1, rk2)
-    //    val s2 = SchnorrAlgo.sign2(msgBytes, sk2.negate(), rk2, rk1)
-    //
-    //    val signature = (s1._1 + s2._1, s1._2)
-    //
-    //    val isValid = SchnorrAlgo.verify(msgBytes, publicKey, signature)
-    //
-    //    val s = signature._1.toByteArray
-    //    val e = signature._2.toByteArray
-    //
-    //    println(s"IsValid: $isValid")
-    ////    println(s"s: ${s.length}, e: ${e.length}, sk: ${privateKey.length}")
 }
 
 object MW {
 
-    import ECC._
+    import Secp256k1._
+
+    type Signature = (BigInteger, BigInteger)
+    type KeyPair = (BigInteger, ECPoint)
+    type Commitment = ECPoint
 
     private val HBytes =
         Hex.decode("0450929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac031d3c6863973926e049e637cb1b5f40a36dac28af1766968c30c2313f3a38904")
 
-    val H: ECPoint = ECC.ECSpec.getCurve.decodePoint(HBytes)
+    val H: ECPoint = Secp256k1.ECSpec.getCurve.decodePoint(HBytes)
 
-
-    def commitTo(v: BigInteger): (BigInteger, ECPoint, ECPoint) = {
-        val (rg, r) = generateKP()
-        (r, rg, rg + H * v)
+    def commitTo(v: Long): PedersenCommitment = {
+        val (r, rG) = generateKP()
+        PedersenCommitment(
+            value = v,
+            blindingFactor = r,
+            commitmentToBlindingFactor = rG,
+            theCommitment = rG + H * BigInteger.valueOf(v)
+        )
     }
+
+    def offerMoney(message: String, inputs: List[PedersenCommitment]): InternalMoneyOffer = {
+        val (signKey, commitmentToSignature) = generateKP()
+        InternalMoneyOffer(
+            MoneyOffer(
+                value = inputs.map(_.value).sum,
+                message = message.getBytes(StandardCharsets.UTF_8),
+                commitmentToSignature = commitmentToSignature
+            ),
+            inputs, signKey
+        )
+    }
+
+    def acceptMoney(offer: MoneyOffer, outputs: List[PedersenCommitment]): MoneyAccept = {
+        val (signKey, commitmentToSignature) = generateKP()
+        val commonCommitmentToSignature = offer.commitmentToSignature + commitmentToSignature
+        val outputKeys = outputs.sumOf(_.blindingFactor)
+        val signature =
+            SchnorrAlgo.sign(
+                data = offer.message,
+                key = outputKeys.negate(), // must negate as pub key will be (inputs * G - outputs * G)
+                r = commonCommitmentToSignature,
+                k = signKey
+            )
+        MoneyAccept(
+            outputs = outputs.map(_.theCommitment),
+            commitmentToSignature = commitmentToSignature,
+            receiverSignature = signature
+        )
+    }
+
+    def createTransaction(message: String, offer: InternalMoneyOffer, accept: MoneyAccept): Transaction = {
+        val commonCommitmentToSignature = offer.external.commitmentToSignature + accept.commitmentToSignature
+        val outputKeys = offer.inputs.sumOf(_.blindingFactor)
+        val senderSignature =
+            SchnorrAlgo.sign(
+                data = offer.external.message,
+                key = outputKeys, //
+                r = commonCommitmentToSignature,
+                k = offer.signKey
+            )
+        val signature = (senderSignature._1 + accept.receiverSignature._1, senderSignature._2)
+        Transaction(
+            offer.external.message,
+            inputs = offer.inputs.map(_.theCommitment),
+            outputs = accept.outputs,
+            signature = signature
+        )
+    }
+
+
+    def verifyTransaction(tx: Transaction): Boolean = {
+        val input = sum(tx.inputs)
+        val output = sum(tx.outputs)
+        val excess = input - output
+        SchnorrAlgo.verify(tx.message, excess, tx.signature)
+    }
+
+    implicit class SignatureOps(s: Signature) {
+        def +(o: Signature): Signature = (s._1 + o._1, s._2 + o._2)
+    }
+
+    implicit class KeyPairOps(kp: KeyPair) {
+        def +(o: KeyPair): KeyPair = (kp._1 + o._1, kp._2 + o._2)
+    }
+
+    implicit class SumBigIntegersOf[T](values: Iterable[T]) {
+        def sumOf(f: T => BigInteger): BigInteger = {
+            values.foldRight(BigInteger.valueOf(0)) { case (c, v) => f(c) + v }
+        }
+    }
+
 }
+
+case class InternalMoneyOffer(
+  external: MoneyOffer,
+  //toRemember:
+  inputs: List[PedersenCommitment],
+  signKey: BigInteger
+)
+
+case class MoneyOffer(
+  value: Long,
+  message: Array[Byte],
+  commitmentToSignature: ECPoint // from sender
+)
+
+case class MoneyAccept(
+  outputs: List[ECPoint],
+  commitmentToSignature: ECPoint, // from receiver
+  receiverSignature: (BigInteger, BigInteger)
+)
+
+case class Transaction(
+  message: Array[Byte],
+  inputs: List[ECPoint],
+  outputs: List[ECPoint],
+  signature: (BigInteger, BigInteger)
+)
+
+case class PedersenCommitment(
+  value: Long,
+  blindingFactor: BigInteger,
+  commitmentToBlindingFactor: ECPoint,
+  theCommitment: ECPoint
+)
 
 object SchnorrAlgo {
 
-    import ECC._
+    import Secp256k1._
 
-    def sign(data: Array[Byte], key: Array[Byte]): (BigInteger, BigInteger) = {
-        val x = new BigInteger(key)
-        val (r, k) = generateKP() // random k, r = G*k
-        val e = new BigInteger(Hash(r, data))
-        val s = k + x * e
-        (s, e)
+    def sign(data: Array[Byte], key: BigInteger): (BigInteger, BigInteger) = {
+        val (k, r) = generateKP() // random k, r = G*k
+        sign(data, key, r, k)
     }
 
-    def sign2(data: Array[Byte], key: BigInteger, r: ECPoint, k: BigInteger): (BigInteger, BigInteger) = {
+    def sign(data: Array[Byte], key: BigInteger, r: ECPoint, k: BigInteger): (BigInteger, BigInteger) = {
         val e = new BigInteger(Hash(r, data))
         val s = k + key * e
         (s, e)
     }
 
-    def verify(data: Array[Byte], publicKey: Array[Byte], signature: (BigInteger, BigInteger)): Boolean = {
+    def verify(data: Array[Byte], publicKey: ECPoint, signature: (BigInteger, BigInteger)): Boolean = {
         val y = ECSpec.getCurve.decodePoint(publicKey)
         val (s, e) = signature
         val rv = G * s + y * e.negate()
@@ -123,13 +206,14 @@ object SchnorrAlgo {
     }
 }
 
-object ECC {
+object Secp256k1 {
     val ECSpec: ECNamedCurveParameterSpec = ECNamedCurveTable.getParameterSpec("secp256k1")
     val G: ECPoint = ECSpec.getG
     val q: BigInteger = ECSpec.getCurve.getOrder
 
+    private val keyPairGenerator = createGenerator()
 
-    def generateKP(): (ECPoint, BigInteger) = {
+    private def createGenerator(): ECKeyPairGenerator = {
         val kpGen = new ECKeyPairGenerator()
         kpGen.init(
             new ECKeyGenerationParameters(
@@ -142,9 +226,18 @@ object ECC {
                 new SecureRandom()
             )
         )
-        val kp: AsymmetricCipherKeyPair = kpGen.generateKeyPair()
-        (kp.getPublic.asInstanceOf[ECPublicKeyParameters].getQ, kp.getPrivate.asInstanceOf[ECPrivateKeyParameters].getD)
+        kpGen
     }
+
+    def generateKP(): (BigInteger, ECPoint) = {
+        val kp: AsymmetricCipherKeyPair = keyPairGenerator.generateKeyPair()
+        (
+          kp.getPrivate.asInstanceOf[ECPrivateKeyParameters].getD,
+          kp.getPublic.asInstanceOf[ECPublicKeyParameters].getQ
+        )
+    }
+
+    def sum(points: List[ECPoint]): ECPoint = points.foldRight(ECSpec.getCurve.getInfinity) { case (v, c) => c + v }
 
     implicit class ECPOps(p: ECPoint) {
         def +(o: ECPoint): ECPoint = p.add(o)

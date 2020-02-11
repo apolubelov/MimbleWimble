@@ -1,1 +1,1 @@
-# mw
+Implementation of MimbleWimble protocol in Scala

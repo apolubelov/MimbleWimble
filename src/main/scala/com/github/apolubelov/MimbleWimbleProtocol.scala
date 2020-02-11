@@ -30,10 +30,10 @@ object MimbleWimbleProtocol {
         )
     }
 
-    def offerMoney(message: Array[Byte], inputs: List[PedersenCommitment]): InternalMoneyOffer = {
+    def offer(message: Array[Byte], inputs: List[PedersenCommitment]): InternalOffer = {
         val (signKey, commitmentToSign) = generateKeyPair()
-        InternalMoneyOffer(
-            MoneyOffer(
+        InternalOffer(
+            Offer(
                 value = inputs.map(_.value).sum,
                 message = message,
                 commitmentToSign = commitmentToSign
@@ -42,7 +42,7 @@ object MimbleWimbleProtocol {
         )
     }
 
-    def acceptMoney(offer: MoneyOffer, outputs: List[PedersenCommitment]): MoneyAccept = {
+    def accept(offer: Offer, outputs: List[PedersenCommitment]): Accept = {
         val (signKey, commitmentToSignature) = generateKeyPair()
         val commonCommitmentToSignature = offer.commitmentToSign + commitmentToSignature
         val outputKeys = outputs.sumOf(_.blindingFactor)
@@ -53,26 +53,26 @@ object MimbleWimbleProtocol {
                 r = commonCommitmentToSignature,
                 k = signKey
             )
-        MoneyAccept(
+        Accept(
             outputs = outputs.map(_.theCommitment),
             commitmentToSign = commitmentToSignature,
             receiverSignature = signature
         )
     }
 
-    def createTransaction(message: Array[Byte], offer: InternalMoneyOffer, accept: MoneyAccept): Transaction = {
-        val commonCommitmentToSignature = offer.external.commitmentToSign + accept.commitmentToSign
+    def createTransaction(message: Array[Byte], offer: InternalOffer, accept: Accept): Transaction = {
+        val commonCommitmentToSignature = offer.toSend.commitmentToSign + accept.commitmentToSign
         val outputKeys = offer.inputs.sumOf(_.blindingFactor)
         val senderSignature =
             SchnorrSignature.sign(
-                data = offer.external.message,
+                data = offer.toSend.message,
                 key = outputKeys, //
                 r = commonCommitmentToSignature,
                 k = offer.signKey
             )
         val signature = senderSignature + accept.receiverSignature
         Transaction(
-            offer.external.message,
+            offer.toSend.message,
             inputs = offer.inputs.map(_.theCommitment),
             outputs = accept.outputs,
             signature = signature
@@ -100,20 +100,20 @@ object MimbleWimbleProtocol {
         }
     }
 
-    case class InternalMoneyOffer(
-      external: MoneyOffer,
+    case class InternalOffer(
+      toSend: Offer,
       //toRemember:
       inputs: List[PedersenCommitment],
       signKey: Key
     )
 
-    case class MoneyOffer(
+    case class Offer(
       value: Long,
       message: Array[Byte],
       commitmentToSign: Commitment // from sender
     )
 
-    case class MoneyAccept(
+    case class Accept(
       outputs: List[Commitment],
       commitmentToSign: Commitment, // from receiver
       receiverSignature: Signature
